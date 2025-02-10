@@ -1,0 +1,203 @@
+1.
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <BluetoothSerial.h>
+#include <Encoder.h>
+
+const char* ssid = "Parking_System";
+const char* password = "12345678";
+
+#define MOTOR_IN1 17
+#define MOTOR_IN2 16
+#define MOTOR_PWM 5
+#define ENCODER_A 9
+#define ENCODER_B 10
+Encoder myEncoder(ENCODER_A, ENCODER_B);
+
+#define TRIG 4
+#define ECHO 18
+
+BluetoothSerial SerialBT;
+String slaveMAC = "AA:BB:CC:DD:EE:FF";
+
+const int targetPosition = 2000;
+volatile long encoderPosition = 0;
+bool isMoving = false;
+
+WiFiServer server(80);
+
+void setup() {
+  Serial.begin(115200);
+  
+  pinMode(MOTOR_IN1, OUTPUT);
+  pinMode(MOTOR_IN2, OUTPUT);
+  ledcSetup(0, 5000, 8);
+  ledcAttachPin(MOTOR_PWM, 0);
+
+  myEncoder.write(0);
+
+  pinMode(TRIG, OUTPUT);
+  pinMode(ECHO, INPUT);
+
+  WiFi.softAP(ssid, password);
+  server.begin();
+
+  SerialBT.begin("Parking_Control", true); 
+  if (!SerialBT.connect(slaveMAC)) {
+    Serial.println("Bluetooth connection failed!");
+  }
+}
+
+void loop() {
+  static unsigned long lastCheck = 0;
+  encoderPosition = myEncoder.read();
+
+  if (isMoving) {
+    controlMotor();
+  }
+
+  if (millis() - lastCheck > 100) {
+    checkDistance();
+    lastCheck = millis();
+  }
+
+  WiFiClient client = server.available();
+  if (client) {
+    handleClientRequest(client);
+  }
+}
+
+void controlMotor() {
+  int error = targetPosition - encoderPosition;
+  int speed = constrain(abs(error) * 0.5, 0, 255);
+
+  if (error > 0) {
+    digitalWrite(MOTOR_IN1, HIGH);
+    digitalWrite(MOTOR_IN2, LOW);
+  } else {
+    digitalWrite(MOTOR_IN1, LOW);
+    digitalWrite(MOTOR_IN2, HIGH);
+  }
+  
+  ledcWrite(0, speed);
+
+  if (abs(error) < 10) {
+    stopMotor();
+    Serial.println("Position reached!");
+  }
+}
+
+void stopMotor() {
+  digitalWrite(MOTOR_IN1, LOW);
+  digitalWrite(MOTOR_IN2, LOW);
+  ledcWrite(0, 0);
+  isMoving = false;
+}
+
+void checkDistance() {
+  digitalWrite(TRIG, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG, LOW);
+  
+  long duration = pulseIn(ECHO, HIGH);
+  float distance = (duration * 0.034) / 2;
+
+  if (distance < 5.0 && isMoving) {
+    stopMotor();
+    Serial.println("Emergency stop!");
+  }
+}
+
+void handleClientRequest(WiFiClient client) {
+  String request = client.readStringUntil('\r');
+  client.flush();
+
+  if (request.indexOf("/scan?qr=") != -1) {
+    int qrCode = request.substring(request.indexOf("=")+1).toInt();
+    int freeSlot = findFreeSlot();
+    
+    if (freeSlot != -1) {
+      startParkingProcedure(freeSlot);
+      client.println("HTTP/1.1 200 OK");
+      client.println("Content-Type: text/html");
+      client.println("Parking slot assigned: " + String(freeSlot+1));
+    }
+  }
+}
+
+void startParkingProcedure(int slot) {
+  myEncoder.write(0);
+  isMoving = true;
+  SerialBT.print("GO");
+}
+
+int findFreeSlot() {
+  for (int i = 0; i < 6; i++) {
+    if (!parkingSlots[i]) return i;
+  }
+  return -1;
+}
+
+
+2.
+#include <BluetoothSerial.h>
+#include <Arduino.h>
+
+BluetoothSerial SerialBT;
+
+#define IN1 26
+#define IN2 27
+#define IN3 14
+#define IN4 12
+#define ENA 32
+#define ENB 33
+#define TRIG 5
+#define ECHO 18
+
+void setup() {
+  Serial.begin(115200);
+  SerialBT.begin("Car_Controller");
+  
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+  pinMode(ENA, OUTPUT);
+  pinMode(ENB, OUTPUT);
+  pinMode(TRIG, OUTPUT);
+  pinMode(ECHO, INPUT);
+  
+  analogWrite(ENA, 200);
+  analogWrite(ENB, 200);
+}
+
+void loop() {
+  long duration = pulseIn(ECHO, HIGH);
+  float distance = (duration * 0.034) / 2;
+  
+  if (distance < 3) stopMotors();
+
+  if (SerialBT.available()) {
+    String command = SerialBT.readStringUntil('\n');
+    command.trim();
+    
+    if (command == "GO") moveForward();
+    else if (command == "STOP") stopMotors();
+  }
+}
+
+void moveForward() {
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+}
+
+void stopMotors() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+}
